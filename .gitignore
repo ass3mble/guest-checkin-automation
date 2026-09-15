@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+data/*
+!data/.gitkeep
+*.db
+*.sqlite
+*.sqlite3
+*.log
+tools/cloudflared.exe
+
