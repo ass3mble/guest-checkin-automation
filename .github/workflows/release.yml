@@ -1,0 +1,26 @@
+name: Publish v0.1.0 prerelease
+
+on:
+  push:
+    tags:
+      - v0.1.0
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+      - name: Publish release from prepared notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "v0.1.0 - Early open-source snapshot" \
+            --notes-file .github/release-notes/v0.1.0.md \
+            --prerelease \
+            --verify-tag \
+            --latest=false
