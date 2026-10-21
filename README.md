@@ -103,5 +103,5 @@ data/                         Runtime data (ignored by Git)
 
 ## License
 
-No license has been selected yet. Add a `LICENSE` file before distributing this
-project if you want to define reuse permissions.
+This project is released under the [MIT License](LICENSE).
+Third-party libraries and services retain their own licenses and terms.
