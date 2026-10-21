@@ -1,5 +1,8 @@
 # Guest Check-in Automation
 
+[![Python CI](https://github.com/ass3mble/guest-checkin-automation/actions/workflows/ci.yml/badge.svg)](https://github.com/ass3mble/guest-checkin-automation/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Privacy-conscious backend automation for digital guest check-in workflows.
 It receives form submissions, extracts identity-document data with OCR, routes
 reviews to Telegram, and can synchronize approved stays with property-management
@@ -33,6 +36,8 @@ Jotform → FastAPI webhook → SQLite → OCR → Telegram review
 
 ## Quick start
 
+These steps start a **local development instance**, not a public production service.
+
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
@@ -51,6 +56,19 @@ uvicorn checkin_bot.app:create_app --factory --host 127.0.0.1 --port 8000
 
 Or use `run-bot.bat` on Windows. The local database is created under `data/`
 when the application starts.
+
+### Run tests
+
+After installing `requirements-checkin-bot.txt`, run:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+Tests use temporary SQLite databases, synthetic guests, and API smoke checks. They do not
+call live booking, OCR, messaging, or smart-lock services. The same suite runs in
+[GitHub Actions](https://github.com/ass3mble/guest-checkin-automation/actions/workflows/ci.yml)
+on Python 3.11 and 3.12.
 
 ## OCR providers
 
@@ -94,12 +112,31 @@ data/                         Runtime data (ignored by Git)
 
 ## Security and privacy
 
+- **Do not expose this API directly to the internet.** Several booking-read and action
+  endpoints currently lack built-in authentication and authorization. Protect them behind
+  a trusted reverse proxy or gateway and restrict access until proper access controls
+  have been implemented.
+- The Jotform webhook does not yet verify a sender signature/secret, and Telegram webhook
+  authentication requires setting `TELEGRAM_WEBHOOK_SECRET`.
 - Never commit `.env`, databases, logs, uploaded documents, or webhook payloads.
 - Keep API keys, bot tokens, passwords, and webhook secrets in environment
   variables or a secrets manager.
 - Use HTTPS and authenticated webhook endpoints in production.
 - Restrict the Telegram review chat to authorized staff.
 - Rotate credentials immediately if they are ever exposed.
+
+See [SECURITY.md](SECURITY.md) for known limitations and vulnerability reporting.
+Do not use real guest data in public bug reports or tests.
+
+## Project maintenance
+
+- [Contributing guidelines](CONTRIBUTING.md)
+- [Changelog and release scope](CHANGELOG.md)
+- [Security policy and limitations](SECURITY.md)
+
+The public repository is an early snapshot of a system under active development.
+Automated tests do not cover live third-party integrations or attest that deployment is
+secure. Contributions and reproducible bug reports with fake data are welcome.
 
 ## License
 

@@ -441,7 +441,7 @@ def _parse_mandala_jotform_payload(payload: dict[str, Any], form_data: dict[str,
                 "q39_fullName39" if guest_index == 2 else None,
             ],
         )
-        date_of_birth = _format_jotform_date(form_data.get(f"guest_{guest_index}_date_of_birth")) or _parse_pretty_date(
+        date_of_birth = _format_jotform_date(form_data.get(f"guest_{guest_index}_date_of_birth")) or _format_jotform_date(
             _read_any(
                 form_data,
                 [
