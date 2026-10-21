@@ -7,17 +7,24 @@ controls until the limitations below have been addressed.
 
 ## Known limitations
 
-- Booking-read and administrative/processing endpoints do not currently enforce a complete
-  application-level authentication and authorization scheme. Do **not** expose them publicly.
-- The Jotform intake webhook does not yet enforce an end-to-end sender signature/secret check.
-  Place it behind a trusted gateway and configure appropriate verification.
-- Telegram webhook authentication is conditional on setting `TELEGRAM_WEBHOOK_SECRET`.
-  Set a non-empty random secret and configure the same token in Telegram.
+- From v0.2 onward booking-read and processing endpoints require `ADMIN_API_KEY`.
+  These use a shared secret, not a full user/role access-control system. Do not expose them
+  without HTTPS, reverse-proxy controls, monitoring, and rate limiting.
+- Jotform requires `JOTFORM_WEBHOOK_TOKEN`. A header is preferred; URL-query secrets
+  are more easily leaked via access logs/browser history and must be redacted.
+  This is not cryptographic payload signing; implement sender verification at the gateway
+  where possible.
+- Telegram requires `TELEGRAM_WEBHOOK_SECRET` and matches `TELEGRAM_CHAT_ID`.
+  Chat membership alone does not restrict who may issue commands inside that chat.
+- Document downloads use a hostname allowlist, HTTPS-only validation, redirect
+  re-validation, and size limits. DNS rebinding and infrastructure-level controls
+  still require gateway/égress restrictions, particularly with custom allowed hosts.
 - Runtime SQLite records, OCR results, logs, and diagnostic webhook payloads can contain
   personally identifiable information. Protect the filesystem, use strict retention and
   deletion rules, and encrypt/limit access where required by law and your threat model.
 - The repository's offline tests do not validate access controls, cryptography, external
-  service permissions, or overall production security.
+  service permissions, or overall production security. New unit tests check the
+  shared-secret and URL allowlist logic, not the security of live deployments.
 
 ## Responsible reporting
 
@@ -36,3 +43,5 @@ and any suggested mitigation. Do not access or test accounts or data you do not 
 - Use synthetic data in tests and documentation.
 - Rotate exposed credentials immediately, revoke compromised access, and review Git history.
 - Terminate TLS at a trusted proxy and require authentication for protected routes.
+- Existing installations MUST configure new secrets before upgrading to v0.2 or
+  webhook/booking requests will return 503; see [migration instructions](docs/SECURE_DEPLOYMENT.md).

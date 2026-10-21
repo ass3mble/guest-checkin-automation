@@ -82,6 +82,8 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(guest.id, guest_id)
         self.assertEqual(guest.review_status, "approved")
         self.assertEqual(guest.nationality, "TEST")
+        with self.assertRaises(ValueError):
+            self.db.update_guest_fields(guest_id, fields={"malicious_column": "blocked"})
 
         document_id = self.db.upsert_document(
             guest_id=guest_id,

@@ -6,7 +6,6 @@ import hashlib
 import io
 import json
 import logging
-import mimetypes
 import re
 import secrets
 import time
@@ -19,6 +18,7 @@ from PIL import Image
 
 from .config import Settings
 from .schemas import OCRExtractionResult, TelegramCallbackPayload
+from .security import validated_download_url
 
 # Diagnostic logger (configured in app.py)
 diag_logger = logging.getLogger("checkin-bot")
@@ -110,14 +110,34 @@ class OCRProvider:
         return raw
 
     async def _build_image_base64(self, source_url: str) -> str:
+        max_bytes = self.settings.ocr_max_download_mb * 1024 * 1024
         if source_url.startswith("data:image/"):
+            # Limit data URLs too, before decoding their potentially huge payloads.
+            if len(source_url) > (max_bytes * 4 // 3) + 1024:
+                raise ValueError("Document exceeds the configured OCR download size limit.")
             return self._normalize_data_image(source_url)
 
-        async with httpx.AsyncClient(timeout=60) as client:
-            source_response = await client.get(source_url, follow_redirects=True)
-            source_response.raise_for_status()
-            content_type = source_response.headers.get("content-type", "image/jpeg")
-            return self._normalize_binary_image(source_response.content, content_type)
+        url = source_url
+        async with httpx.AsyncClient(timeout=60, trust_env=False, follow_redirects=False) as client:
+            for _ in range(5):
+                validated_download_url(url, self.settings.ocr_allowed_download_hosts)
+                async with client.stream("GET", url) as response:
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        location = response.headers.get("location")
+                        if not location:
+                            raise ValueError("Document redirect is missing its destination.")
+                        url = str(response.url.join(location))
+                        continue
+                    response.raise_for_status()
+                    if int(response.headers.get("content-length", "0")) > max_bytes:
+                        raise ValueError("Document exceeds the configured OCR download size limit.")
+                    content = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        content.extend(chunk)
+                        if len(content) > max_bytes:
+                            raise ValueError("Document exceeds the configured OCR download size limit.")
+                    return self._normalize_binary_image(bytes(content), response.headers.get("content-type", "image/jpeg"))
+        raise ValueError("Too many redirects while downloading a document.")
 
     async def _analyze_with_azure(self, client: httpx.AsyncClient, *, model_id: str, image_base64: str) -> dict[str, Any]:
         analyze_url = (
@@ -248,6 +268,8 @@ class OCRProvider:
 
     def _normalize_binary_image(self, image_bytes: bytes, mime_type: str) -> str:
         with Image.open(io.BytesIO(image_bytes)) as image:
+            if image.width * image.height > 20_000_000:
+                raise ValueError("Document image exceeds the maximum allowed pixel count.")
             image.load()
             image = _flatten_to_rgb(image)
             image = _resize_for_ocr(image)
@@ -827,9 +849,14 @@ class TelegramClient:
                         continue
                     response.raise_for_status()
                 except Exception as exc:
-                    diag_logger.warning(f"  sendPhoto FAILED {item['doc_type']}: {exc}")
+                    diag_logger.warning(
+                        "sendPhoto failed doc_type=%s error_type=%s",
+                        item["doc_type"],
+                        type(exc).__name__,
+                    )
                     await self.send_text_message(
-                        f"Loi gui anh Telegram cho booking {item['external_booking_id']} / {item['doc_type']}: {str(exc)[:200]}"
+                        f"Loi gui anh Telegram cho booking {item['external_booking_id']} / {item['doc_type']}. "
+                        "Kiem tra log loi (khong co du lieu khach)."
                     )
 
     def parse_callback(self, callback_data: str) -> TelegramCallbackPayload:
@@ -856,24 +883,13 @@ class TelegramClient:
         source_url: str,
         doc_type: str,
     ) -> dict[str, Any]:
-        if source_url.startswith("data:image/"):
-            header, encoded = source_url.split(",", 1)
-            mime_type = header.split(";", 1)[0].removeprefix("data:")
-            extension = mimetypes.guess_extension(mime_type) or ".jpg"
-            return {
-                "filename": f"{doc_type}{extension}",
-                "mime_type": mime_type,
-                "content": base64.b64decode(encoded),
-            }
-
-        response = await client.get(source_url, follow_redirects=True)
-        response.raise_for_status()
-        mime_type = response.headers.get("content-type", "image/jpeg").split(";", 1)[0].strip()
-        extension = mimetypes.guess_extension(mime_type) or ".jpg"
+        # Use exactly the same validated download path and size caps as OCR.
+        # A separate unrestricted Telegram image fetch would reintroduce SSRF.
+        jpeg_encoded = await OCRProvider(self.settings)._build_image_base64(source_url)
         return {
-            "filename": f"{doc_type}{extension}",
-            "mime_type": mime_type,
-            "content": response.content,
+            "filename": f"{doc_type}.jpg",
+            "mime_type": "image/jpeg",
+            "content": base64.b64decode(jpeg_encoded),
         }
 
     async def _telegram_post_with_retry(
@@ -932,25 +948,11 @@ class Beds24Client:
 
     def _log_booking_sample(self, *, booking_identifier: str, bookings: list[dict[str, Any]], source: str) -> None:
         if not bookings:
-            diag_logger.info(f"Beds24 debug: no bookings returned for identifier={booking_identifier} source={source}")
+            diag_logger.info("Beds24: no bookings returned (source=%s)", source)
             return
-
-        diag_logger.info(
-            f"Beds24 debug: identifier={booking_identifier} source={source} candidate_count={len(bookings)}"
-        )
-        for index, booking in enumerate(bookings[:3], start=1):
-            match_keys: list[str] = []
-            for key in ("id", "apiReference", "reference", "comments", "notes", "groupNote", "voucher"):
-                value = booking.get(key)
-                if value is not None and str(value).strip() == booking_identifier:
-                    match_keys.append(key)
-            compact = self._compact_for_log(booking)
-            diag_logger.info(
-                "Beds24 debug sample #%s match_keys=%s payload=%s",
-                index,
-                match_keys or "-",
-                json.dumps(compact, ensure_ascii=False, indent=2),
-            )
+        # Beds24 responses include guest names, contact details, and reservation
+        # notes. Log only coarse metadata, never complete booking objects.
+        diag_logger.info("Beds24: candidate_count=%d source=%s", len(bookings), source)
 
     def _normalize_text(self, value: Any) -> str:
         return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
@@ -1705,16 +1707,10 @@ class GoogleSheetMirror:
         if not self.settings.sync_google_sheet or not self.settings.google_sheet_webhook_url:
             diag_logger.info("Google Sheet sync skipped: disabled or missing webhook URL")
             return
-        booking_id = str(payload.get("id") or "-")
-        submission_id = str(payload.get("jotform_submission_id") or "-")
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             response = await client.post(self.settings.google_sheet_webhook_url, json=payload)
             response.raise_for_status()
-        response_preview = response.text[:300].replace("\n", " ").replace("\r", " ")
         diag_logger.info(
-            "Google Sheet sync completed booking_id=%s submission_id=%s status=%s body=%s",
-            booking_id,
-            submission_id,
+            "Google Sheet sync completed status=%s",
             response.status_code,
-            response_preview,
         )

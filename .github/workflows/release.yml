@@ -1,9 +1,9 @@
-name: Publish v0.1.0 prerelease
+name: Publish tagged prerelease
 
 on:
   push:
     tags:
-      - v0.1.0
+      - "v0.*"
 
 permissions:
   contents: write
@@ -14,13 +14,25 @@ jobs:
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-checkin-bot.txt
+      - name: Install dependencies
+        run: python -m pip install -r requirements-checkin-bot.txt
+      - name: Validate source and synthetic tests before publishing
+        run: |
+          python -m compileall -q checkin_bot tests tools
+          python -m unittest discover -s tests -v
       - name: Publish release from prepared notes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            --title "v0.1.0 - Early open-source snapshot" \
-            --notes-file .github/release-notes/v0.1.0.md \
+            --title "$GITHUB_REF_NAME - Security and maintenance improvements" \
+            --notes-file ".github/release-notes/$GITHUB_REF_NAME.md" \
             --prerelease \
             --verify-tag \
             --latest=false

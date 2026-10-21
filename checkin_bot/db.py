@@ -23,6 +23,7 @@ class Database:
     @contextmanager
     def connect(self):
         connection = sqlite3.connect(self.path)
+        connection.execute("PRAGMA foreign_keys = ON")
         connection.row_factory = sqlite3.Row
         try:
             yield connection
@@ -239,6 +240,9 @@ class Database:
 
     def update_guest_fields(self, guest_id: str, *, review_status: str | None = None, fields: dict[str, Any] | None = None) -> None:
         fields = fields or {}
+        editable = {"full_name", "date_of_birth", "gender", "nationality", "passport_number", "visa_number"}
+        if not set(fields).issubset(editable):
+            raise ValueError("Unexpected guest database column in update_guest_fields.")
         assignments: list[str] = []
         values: list[Any] = []
         for key, value in fields.items():

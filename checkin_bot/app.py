@@ -11,13 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 
 from .config import load_settings
 from .db import Database
 from .integrations import Beds24Client, GoogleSheetMirror, OCRProvider, TelegramClient, TTLockClient
 from .schemas import BookingInput, BookingView
 from .service import CheckinService
+from .security import bearer_token, require_token
 
 # === DIAGNOSTIC LOGGING (for tracking flow, easy to remove later) ===
 LOG_PATH = Path("bot.log")
@@ -30,6 +31,10 @@ logging.basicConfig(
     ],
     force=True,
 )
+# httpx emits the full request URL at INFO, including image links that can
+# contain short-lived private query tokens. Do not log them by default.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 diag_logger = logging.getLogger("checkin-bot")
 
 
@@ -50,6 +55,12 @@ def create_app() -> FastAPI:
     app.state.settings = settings
     app.state.service = service
 
+    def require_admin(
+        authorization: str | None = Header(default=None),
+        x_api_key: str | None = Header(default=None),
+    ) -> None:
+        require_token(settings.admin_api_key, bearer_token(authorization) or x_api_key, purpose="Admin API")
+
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -64,6 +75,11 @@ def create_app() -> FastAPI:
 
     @app.post("/webhooks/jotform")
     async def jotform_webhook(request: Request, background_tasks: BackgroundTasks) -> dict[str, str]:
+        require_token(
+            settings.jotform_webhook_token,
+            request.headers.get("x-checkin-webhook-token") or request.query_params.get("token"),
+            purpose="Jotform webhook",
+        )
         request_id = uuid.uuid4().hex[:12]
         started = time.perf_counter()
         client_host = request.client.host if request.client else "-"
@@ -79,27 +95,25 @@ def create_app() -> FastAPI:
             booking_input = parse_jotform_payload(payload)
             booking_id = await service.ingest_booking(booking_input)
             diag_logger.info(
-                "JOTFORM webhook ingested request_id=%s booking_id=%s external_booking_id=%s",
+                "JOTFORM webhook ingested request_id=%s",
                 request_id,
-                booking_id,
-                booking_input.external_booking_id,
             )
             background_tasks.add_task(service.process_booking_ocr, booking_id)
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             diag_logger.info(
-                "JOTFORM webhook completed request_id=%s status=accepted booking_id=%s elapsed_ms=%s",
+                "JOTFORM webhook completed request_id=%s status=accepted elapsed_ms=%s",
                 request_id,
-                booking_id,
                 elapsed_ms,
             )
             return {"status": "accepted", "booking_id": booking_id}
         except Exception as exc:
             error_id = _write_webhook_error(settings.base_dir, payload, exc)
             elapsed_ms = int((time.perf_counter() - started) * 1000)
-            diag_logger.exception(
-                "JOTFORM webhook failed request_id=%s error_id=%s elapsed_ms=%s",
+            diag_logger.error(
+                "JOTFORM webhook failed request_id=%s error_id=%s error_type=%s elapsed_ms=%s",
                 request_id,
                 error_id,
+                type(exc).__name__,
                 elapsed_ms,
             )
             return {"status": "error_logged", "error_id": error_id}
@@ -109,12 +123,17 @@ def create_app() -> FastAPI:
         payload: dict[str, Any],
         x_telegram_bot_api_secret_token: str | None = Header(default=None),
     ) -> dict[str, str]:
-        if settings.telegram_webhook_secret and x_telegram_bot_api_secret_token != settings.telegram_webhook_secret:
-            raise HTTPException(status_code=401, detail="Invalid Telegram webhook secret.")
+        require_token(
+            settings.telegram_webhook_secret,
+            x_telegram_bot_api_secret_token,
+            purpose="Telegram webhook",
+        )
 
         callback_query = payload.get("callback_query")
         if callback_query and callback_query.get("data"):
             callback_chat = (callback_query.get("message") or {}).get("chat", {})
+            if not settings.telegram_chat_id or str(callback_chat.get("id")) != settings.telegram_chat_id:
+                raise HTTPException(status_code=403, detail="Telegram chat is not authorized.")
             diag_logger.info(
                 "TELEGRAM callback chat_id=%s type=%s title=%s",
                 callback_chat.get("id"),
@@ -131,13 +150,12 @@ def create_app() -> FastAPI:
         message = payload.get("message") or {}
         text = str(message.get("text") or "").strip()
         chat_id = message.get("chat", {}).get("id")
+        if not settings.telegram_chat_id or str(chat_id) != settings.telegram_chat_id:
+            raise HTTPException(status_code=403, detail="Telegram chat is not authorized.")
         if chat_id:
             diag_logger.info(
-                "TELEGRAM message chat_id=%s type=%s title=%s text=%s",
-                chat_id,
+                "TELEGRAM message received type=%s",
                 message.get("chat", {}).get("type"),
-                message.get("chat", {}).get("title") or message.get("chat", {}).get("username"),
-                text[:120],
             )
         if text.startswith("/") and chat_id:
             actor = message.get("from", {}).get("username") or str(message.get("from", {}).get("id", "telegram"))
@@ -147,29 +165,29 @@ def create_app() -> FastAPI:
 
         return {"status": "ignored"}
 
-    @app.get("/bookings/{booking_id}", response_model=BookingView)
+    @app.get("/bookings/{booking_id}", response_model=BookingView, dependencies=[Depends(require_admin)])
     async def get_booking(booking_id: str) -> BookingView:
         try:
             return service.get_booking_view(booking_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.post("/bookings/{booking_id}/process-ocr")
+    @app.post("/bookings/{booking_id}/process-ocr", dependencies=[Depends(require_admin)])
     async def process_ocr(booking_id: str) -> dict[str, str]:
         await service.process_booking_ocr(booking_id)
         return {"status": "processed", "booking_id": booking_id}
 
-    @app.post("/bookings/{booking_id}/review/send")
+    @app.post("/bookings/{booking_id}/review/send", dependencies=[Depends(require_admin)])
     async def review_send(booking_id: str) -> dict[str, str]:
         await service.send_review_message(booking_id)
         return {"status": "sent", "booking_id": booking_id}
 
-    @app.post("/bookings/{booking_id}/sheet/sync")
+    @app.post("/bookings/{booking_id}/sheet/sync", dependencies=[Depends(require_admin)])
     async def sync_sheet(booking_id: str) -> dict[str, str]:
         await service.sync_booking_to_sheet(booking_id)
         return {"status": "synced", "booking_id": booking_id}
 
-    @app.post("/bookings/{booking_id}/beds24/refresh")
+    @app.post("/bookings/{booking_id}/beds24/refresh", dependencies=[Depends(require_admin)])
     async def refresh_beds24_booking(booking_id: str) -> dict[str, Any]:
         try:
             beds24_booking = await service.refresh_beds24_booking(booking_id)
@@ -177,7 +195,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"status": "ok", "booking_id": booking_id, "beds24_booking": beds24_booking}
 
-    @app.post("/beds24/retry-unmatched")
+    @app.post("/beds24/retry-unmatched", dependencies=[Depends(require_admin)])
     async def retry_unmatched_beds24() -> dict[str, int | str]:
         result = await service.retry_unmatched_beds24_bookings()
         return {"status": "ok", **result}
@@ -240,16 +258,15 @@ async def _coerce_form_value(value: Any) -> Any:
 
 def _write_webhook_error(base_dir: Path, payload: dict[str, Any], exc: Exception) -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    error_id = f"jotform-error-{timestamp}"
+    error_id = f"jotform-error-{timestamp}-{uuid.uuid4().hex[:8]}"
     error_dir = base_dir / "data" / "webhook-errors"
     error_dir.mkdir(parents=True, exist_ok=True)
     (error_dir / f"{error_id}.json").write_text(
         json.dumps(
             {
-                "error": str(exc),
                 "error_type": type(exc).__name__,
-                "payload_keys": sorted(payload.keys()),
-                "payload": payload,
+                "field_count": len(payload),
+                "note": "Raw payload intentionally omitted to protect guest privacy.",
             },
             ensure_ascii=False,
             indent=2,
@@ -297,22 +314,8 @@ def parse_jotform_payload(payload: dict[str, Any]) -> BookingInput:
         raw_body = payload["rawBody"]
         parse_source = "rawBody_recovery"
 
-        # Save rawBody to file for deep debugging (as requested)
-        try:
-            debug_path = Path("data/last_jotform_rawbody.txt")
-            debug_path.write_text(raw_body, encoding="utf-8", errors="replace")
-            diag_logger.warning(f"Saved full rawBody ({len(raw_body)} chars) to {debug_path} for inspection")
-        except Exception as e:
-            diag_logger.error(f"Failed to save rawBody: {e}")
-
-        # Save the whole error payload as JSON too
-        try:
-            err_payload = dict(payload)
-            err_payload["_raw_body_length"] = len(raw_body)
-            err_path = Path("data/last_jotform_error_payload.json")
-            err_path.write_text(json.dumps(err_payload, ensure_ascii=False, default=str), encoding="utf-8")
-        except Exception:
-            pass
+        # Never dump request bodies or full error payloads containing guest PII.
+        diag_logger.warning("Jotform payload recovery invoked (body_length=%d)", len(raw_body))
 
         try:
             recovered = json.loads(raw_body)
@@ -365,9 +368,9 @@ def parse_jotform_payload(payload: dict[str, Any]) -> BookingInput:
         except Exception:
             pass
 
-        diag_logger.info(f"rawBody recovery done. Keys now in merged_payload: {list(merged_payload.keys())[:12]}")
+        diag_logger.info("rawBody recovery done (field_count=%d)", len(merged_payload))
         if not any(k in merged_payload for k in ["BOOKINGID", "q32_BOOKINGID"]):
-            diag_logger.warning("Still no BOOKINGID/q32_BOOKINGID after aggressive recovery. Inspect data/last_jotform_rawbody.txt")
+            diag_logger.warning("Booking identifier missing after payload recovery")
 
     booking_id_hint = _extract_booking_id(merged_payload)
     if booking_id_hint or _read_any(merged_payload, ["q27_roomName", "q5_numGuest", "reservation_code", "Reservation Code"]):
@@ -399,7 +402,6 @@ def parse_jotform_payload(payload: dict[str, Any]) -> BookingInput:
     if external_booking_id == "unknown-booking":
         diag_logger.warning(
             "Parser fell back to 'unknown-booking'. "
-            f"submission_id={payload.get('submissionID') or payload.get('submission_id')}. "
             f"Available keys sample: {sorted(list(merged_payload.keys()))[:15]}"
         )
     lead_guest_name = _read_any(merged_payload, ["lead_guest_name", "main_guest_name", "guest_1_full_name"])
@@ -545,9 +547,6 @@ def _parse_mandala_jotform_payload(payload: dict[str, Any], form_data: dict[str,
     if external_booking_id == "unknown-booking":
         diag_logger.warning(
             "Mandala parser fell back to 'unknown-booking'. "
-            f"q32_BOOKINGID={_read_any(form_data, ['q32_BOOKINGID'])}, "
-            f"BOOKINGID from URL/generic={_read_any(form_data, ['BOOKINGID']) or _extract_booking_id(form_data)}, "
-            f"submission_id={booking_metadata.get('submission_id')}. "
             f"Keys sample: {sorted([k for k in form_data if not k.startswith('q') or k in ('q32_BOOKINGID', 'q5_numGuest')])[:10]}"
         )
 

@@ -48,6 +48,8 @@ class Settings:
     telegram_bot_token: str
     telegram_chat_id: str
     telegram_webhook_secret: str
+    admin_api_key: str
+    jotform_webhook_token: str
     ocr_provider_order: tuple[str, ...]
     azure_document_intelligence_endpoint: str
     azure_document_intelligence_key: str
@@ -92,6 +94,8 @@ class Settings:
     google_sheet_webhook_url: str
     allowed_document_types: tuple[str, ...]
     webhook_max_part_size_mb: int
+    ocr_allowed_download_hosts: tuple[str, ...]
+    ocr_max_download_mb: int
 
     @property
     def sqlite_path(self) -> Path:
@@ -127,6 +131,8 @@ def load_settings() -> Settings:
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         telegram_webhook_secret=os.getenv("TELEGRAM_WEBHOOK_SECRET", ""),
+        admin_api_key=os.getenv("ADMIN_API_KEY", ""),
+        jotform_webhook_token=os.getenv("JOTFORM_WEBHOOK_TOKEN", ""),
         ocr_provider_order=ocr_provider_order,
         azure_document_intelligence_endpoint=os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT", "").rstrip("/"),
         azure_document_intelligence_key=os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY", ""),
@@ -171,6 +177,13 @@ def load_settings() -> Settings:
         google_sheet_webhook_url=os.getenv("GOOGLE_SHEET_WEBHOOK_URL", ""),
         allowed_document_types=allowed_document_types,
         webhook_max_part_size_mb=max(1, int(os.getenv("WEBHOOK_MAX_PART_SIZE_MB", "25"))),
+        ocr_allowed_download_hosts=tuple(
+            host.strip().lower() for host in os.getenv(
+                "OCR_ALLOWED_DOWNLOAD_HOSTS",
+                "jotform.com,jotformusercontent.com,jotformpro.com",
+            ).split(",") if host.strip()
+        ),
+        ocr_max_download_mb=max(1, min(25, int(os.getenv("OCR_MAX_DOWNLOAD_MB", "10")))),
     )
 
 

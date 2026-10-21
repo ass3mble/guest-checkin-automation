@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -28,6 +28,9 @@ class APISmokeTests(unittest.TestCase):
                 "APP_BASE_DIR": cls.temp_dir.name,
                 "DATABASE_URL": "sqlite:///data/ci-checkin.db",
                 "TELEGRAM_WEBHOOK_SECRET": "synthetic-webhook-secret",
+                "TELEGRAM_CHAT_ID": "123456",
+                "ADMIN_API_KEY": "synthetic-admin-key",
+                "JOTFORM_WEBHOOK_TOKEN": "synthetic-jotform-token",
                 "TELEGRAM_BOT_TOKEN": "",
                 "BEDS24_API_TOKEN": "",
                 "BEDS24_REFRESH_TOKEN": "",
@@ -50,7 +53,11 @@ class APISmokeTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.client.close()
-        logging.shutdown()
+        root_logger = logging.getLogger()
+        for handler in list(root_logger.handlers):
+            if isinstance(handler, logging.FileHandler):
+                root_logger.removeHandler(handler)
+                handler.close()
         cls.test_env.stop()
         cls.temp_dir.cleanup()
 
@@ -62,7 +69,35 @@ class APISmokeTests(unittest.TestCase):
         self.assertIn("time_utc", healthz.json())
 
     def test_missing_booking_returns_not_found(self):
-        self.assertEqual(self.client.get("/bookings/nonexistent-test-id").status_code, 404)
+        self.assertEqual(
+            self.client.get("/bookings/nonexistent-test-id", headers={"x-api-key": "synthetic-admin-key"}).status_code,
+            404,
+        )
+
+    def test_protected_api_rejects_missing_or_invalid_key(self):
+        for url, method in (
+            ("/bookings/nonexistent-test-id", "get"),
+            ("/bookings/nonexistent-test-id/process-ocr", "post"),
+            ("/bookings/nonexistent-test-id/review/send", "post"),
+            ("/bookings/nonexistent-test-id/sheet/sync", "post"),
+            ("/bookings/nonexistent-test-id/beds24/refresh", "post"),
+            ("/beds24/retry-unmatched", "post"),
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(getattr(self.client, method)(url).status_code, 401)
+                self.assertEqual(
+                    getattr(self.client, method)(url, headers={"authorization": "Bearer incorrect"}).status_code,
+                    401,
+                )
+
+    def test_admin_bearer_token_is_accepted(self):
+        self.assertEqual(
+            self.client.get(
+                "/bookings/nonexistent-test-id",
+                headers={"authorization": "Bearer synthetic-admin-key"},
+            ).status_code,
+            404,
+        )
 
     def test_telegram_secret_rejected_when_invalid(self):
         response = self.client.post(
@@ -71,6 +106,48 @@ class APISmokeTests(unittest.TestCase):
             headers={"x-telegram-bot-api-secret-token": "invalid-test-token"},
         )
         self.assertEqual(response.status_code, 401)
+
+    def test_telegram_chat_id_is_checked(self):
+        response = self.client.post(
+            "/webhooks/telegram",
+            json={"message": {"text": "hello", "chat": {"id": 456789}}},
+            headers={"x-telegram-bot-api-secret-token": "synthetic-webhook-secret"},
+        )
+        self.assertEqual(response.status_code, 403)
+        response = self.client.post(
+            "/webhooks/telegram",
+            json={"message": {"text": "hello", "chat": {"id": 123456}}},
+            headers={"x-telegram-bot-api-secret-token": "synthetic-webhook-secret"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ignored")
+
+    def test_jotform_requires_webhook_token_before_processing(self):
+        payload = {"booking": {"external_booking_id": "synthetic"}, "guests": []}
+        self.assertEqual(self.client.post("/webhooks/jotform", json=payload).status_code, 401)
+        self.assertEqual(
+            self.client.post("/webhooks/jotform", json=payload, headers={"x-checkin-webhook-token": "incorrect"}).status_code,
+            401,
+        )
+
+    def test_jotform_valid_token_is_accepted_with_mocked_integrations(self):
+        service = self.client.app.state.service
+        with patch.object(service, "ingest_booking", new_callable=AsyncMock, return_value="synthetic-db-id") as ingest, patch.object(
+            service, "process_booking_ocr", new_callable=AsyncMock
+        ) as process:
+            response = self.client.post(
+                "/webhooks/jotform",
+                json={
+                    "booking": {"external_booking_id": "synthetic-ref", "guest_count": 1},
+                    "guests": [{"guest_index": 1, "full_name": "Fictitious Guest"}],
+                },
+                headers={"x-checkin-webhook-token": "synthetic-jotform-token"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "accepted")
+        self.assertEqual(response.json()["booking_id"], "synthetic-db-id")
+        ingest.assert_awaited_once()
+        process.assert_awaited_once_with("synthetic-db-id")
 
     def test_parser_accepts_synthetic_booking(self):
         booking = self.parser(

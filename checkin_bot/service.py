@@ -54,15 +54,14 @@ class CheckinService:
                         )
                     except Exception as exc:
                         diag_logger.warning(
-                            f"Beds24 lookup marker sync failed for external_booking_id={payload.external_booking_id}: {exc}"
+                            "Beds24 lookup marker sync failed (error_type=%s)", type(exc).__name__
                         )
             except Exception as exc:
                 diag_logger.warning(
-                    f"Beds24 lookup failed for external_booking_id={payload.external_booking_id} "
-                    f"(will continue without merging Beds24 data): {exc}"
+                    "Beds24 lookup failed; continuing without merge (error_type=%s)", type(exc).__name__
                 )
         else:
-            diag_logger.info(f"Skipping Beds24 lookup (external_booking_id={payload.external_booking_id})")
+            diag_logger.info("Skipping Beds24 lookup (booking identifier missing)")
 
         booking_id = self.db.upsert_booking(
             external_booking_id=payload.external_booking_id,
@@ -123,7 +122,7 @@ class CheckinService:
         for guest in self.db.list_guests(booking_id):
             merged_fields: dict[str, Any] = {}
             for document in self.db.list_documents_for_guest(guest.id):
-                diag_logger.info(f"  OCR starting guest={guest.guest_index} doc={document.doc_type} url={document.source_url[:60]}...")
+                diag_logger.info("OCR starting guest_index=%d doc_type=%s", guest.guest_index, document.doc_type)
                 await self._process_document(document)
                 latest_document = self.db.fetch_document(document.id)
                 if latest_document and latest_document.extracted:

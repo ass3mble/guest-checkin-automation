@@ -47,6 +47,11 @@ Copy-Item .env.example .env
 
 Open `.env` and add only the credentials and URLs for your own services. The
 real `.env` file is intentionally excluded from Git by `.gitignore`.
+**Before enabling real webhooks**, configure `ADMIN_API_KEY`,
+`JOTFORM_WEBHOOK_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` and `TELEGRAM_CHAT_ID`.
+Booking/admin endpoints and webhooks now **fail closed** when their security
+secrets are unset. For an existing deployment, read
+[the v0.2 migration instructions](docs/SECURE_DEPLOYMENT.md) **before upgrading**.
 
 Start the API:
 
@@ -95,6 +100,13 @@ API credentials; PaddleOCR runs locally through `tools/paddle_ocr_worker.py`.
 | POST | `/bookings/{booking_id}/beds24/refresh` | Refresh Beds24 data |
 | POST | `/beds24/retry-unmatched` | Retry unmatched bookings |
 
+All `/bookings/*` and `/beds24/retry-unmatched` routes require
+`Authorization: Bearer <ADMIN_API_KEY>` or `X-API-Key: <ADMIN_API_KEY>`.
+`/webhooks/jotform` requires `X-Checkin-Webhook-Token` (or `?token=` when a
+custom header is unavailable). `/webhooks/telegram` requires Telegram's
+`X-Telegram-Bot-Api-Secret-Token` and a matching `TELEGRAM_CHAT_ID`.
+Unauthenticated `/health` and `/healthz` remain available.
+
 ## Telegram commands
 
 - `/link <beds24-booking-id>` creates a configured check-in link.
@@ -112,12 +124,14 @@ data/                         Runtime data (ignored by Git)
 
 ## Security and privacy
 
-- **Do not expose this API directly to the internet.** Several booking-read and action
-  endpoints currently lack built-in authentication and authorization. Protect them behind
-  a trusted reverse proxy or gateway and restrict access until proper access controls
-  have been implemented.
-- The Jotform webhook does not yet verify a sender signature/secret, and Telegram webhook
-  authentication requires setting `TELEGRAM_WEBHOOK_SECRET`.
+- **Do not expose the API directly to the internet.** This release includes required
+  shared-secret checks for booking/admin APIs and both webhook endpoints, but it has
+  not had an independent security audit. Use a trusted TLS proxy, rate limiting,
+  network controls, and least-privilege account access.
+- Enable `ADMIN_API_KEY`, `JOTFORM_WEBHOOK_TOKEN`,
+  `TELEGRAM_WEBHOOK_SECRET`, and `TELEGRAM_CHAT_ID` before production migration.
+- OCR document URLs must use HTTPS and an explicitly approved hostname
+  (`OCR_ALLOWED_DOWNLOAD_HOSTS`); redirect destinations are checked again.
 - Never commit `.env`, databases, logs, uploaded documents, or webhook payloads.
 - Keep API keys, bot tokens, passwords, and webhook secrets in environment
   variables or a secrets manager.
@@ -133,6 +147,8 @@ Do not use real guest data in public bug reports or tests.
 - [Contributing guidelines](CONTRIBUTING.md)
 - [Changelog and release scope](CHANGELOG.md)
 - [Security policy and limitations](SECURITY.md)
+- [Secure deployment and migration](docs/SECURE_DEPLOYMENT.md)
+- [Maintainer usage-evidence guide](docs/MAINTAINER_EVIDENCE.md)
 
 The public repository is an early snapshot of a system under active development.
 Automated tests do not cover live third-party integrations or attest that deployment is
