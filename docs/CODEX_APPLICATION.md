@@ -1,4 +1,4 @@
-# Codex for Open Source application — maintainer draft
+# Codex for Open Source application - maintainer draft
 
 Official form: https://openai.com/form/codex-for-oss/
 
